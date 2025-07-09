@@ -3,9 +3,9 @@ import oss2
 import numpy as np
 import requests
 import torch
-import os
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageOps, ImageSequence
 from io import BytesIO
+
 OSS_ENDPOINT_LIST = [
     # 中国内地
     "oss-cn-hangzhou.aliyuncs.com",
@@ -127,6 +127,7 @@ def put_object_for_cn_law(file,filename,access_key_id, access_key_secret, securi
         print(f'图片成功上传到 OSS，文件名为: {filename}')
     except oss2.exceptions.OssError as e:
         raise ValueError(f'上传失败，错误信息: {e}')
+    
 
 # 从oss获取图片
 def get_object(object_key, access_key_id, access_key_secret, security_token, bucket_name, endpoint):
@@ -141,10 +142,20 @@ def get_object(object_key, access_key_id, access_key_secret, security_token, buc
         image = image.convert("RGB")
         image_np = np.array(image).astype(np.float32)
         image_np /= 255.0
+
+        # 如果图像不是灰度图，就拿一层出来充当蒙版，如果是灰度图，就直接使用
+        if image_np.ndim == 3:
+            mask_np = image_np[:, :, -1]
+        else:
+            mask_np = image_np
+        
         image_tensor = torch.from_numpy(image_np)
         image_tensor = image_tensor.unsqueeze(0)
+
+        mask_tensor = torch.from_numpy(mask_np)
+        mask_tensor = mask_tensor.unsqueeze(0)
         print(f"Successfully loaded image from OSS. Tensor shape: {image_tensor.shape}")
-        return (image_tensor,)
+        return (image_tensor, mask_tensor, )
     except oss2.exceptions.NoSuchKey:
         print(f"Error: Object '{object_key}' not found in bucket '{bucket_name}'.")
         # 可以选择返回一个空图像或默认图像，或者直接抛出异常
@@ -165,6 +176,126 @@ def get_object(object_key, access_key_id, access_key_secret, security_token, buc
             # 鉴于我们先 read() 了全部数据，这里通常不需要额外关闭。
             pass
 
+# 从oss获取图片
+def get_image_object(object_key, access_key_id, access_key_secret, security_token, bucket_name, endpoint):
+    try:
+        auth = oss2.StsAuth(access_key_id,access_key_secret,security_token,auth_version = "v2")
+        bucket = oss2.Bucket(auth, endpoint, bucket_name)
+        object_stream = bucket.get_object(object_key)
+        img_data = object_stream.read()
+        if not img_data:
+            raise ValueError(f"Failed to read data for object: {object_key}")
+        img = Image.open(io.BytesIO(img_data))
+        output_images = []
+        output_masks = []
+        w, h = None, None
+
+        excluded_formats = ["MPO"]
+
+        for i in ImageSequence.Iterator(img):
+            i = ImageOps.exif_transpose(i)
+
+            if i.mode == "I":
+                i = i.point(lambda i: i * (1 / 255))
+            image = i.convert("RGB")
+
+            if len(output_images) == 0:
+                w = image.size[0]
+                h = image.size[1]
+            
+            if image.size[0] != w or image.size[1] != h:
+                continue
+
+            image = np.array(image).astype(np.float32) / 255.0
+            image = torch.from_numpy(image)[None, ]
+            if 'A' in i.getbands():
+                mask = np.array(i.getchannel('A')).astype(np.float32) / 255.0
+                mask = 1. - torch.from_numpy(mask)
+            else:
+                mask = torch.zeros((64, 64), dtype=torch.float32, device="cpu")
+            output_images.append(image)
+            output_masks.append(mask.unsqueeze(0))
+            
+
+        if len(output_images) > 1 and img.format not in excluded_formats:
+            output_image = torch.cat(output_images, dim=0)
+            output_mask = torch.cat(output_masks, dim=0)
+        else:
+            output_image = output_images[0]
+            output_mask = output_masks[0]
+        
+        print(f"Successfully loaded image from OSS. Tensor shape: {output_image.shape}")
+        return (output_image, output_mask)
+    except oss2.exceptions.NoSuchKey:
+        print(f"Error: Object '{object_key}' not found in bucket '{bucket_name}'.")
+        # 可以选择返回一个空图像或默认图像，或者直接抛出异常
+        # 这里我们重新抛出异常，让 ComfyUI 显示错误
+        raise oss2.exceptions.NoSuchKey(f"Object '{object_key}' not found in bucket '{bucket_name}'.")
+    except Exception as e:
+        print(f"An error occurred while loading image from OSS: {e}")
+        # 重新抛出异常，以便在 ComfyUI 中看到错误信息
+        raise e
+    finally:
+        # 确保 response 被关闭 (oss2 的 get_object 返回的 stream 在 read() 后通常会自动处理，但显式关闭更安全)
+        if 'object_stream' in locals() and hasattr(object_stream, 'resp') and object_stream.resp:
+            # oss2 < 2.17.0: object_stream.resp.release_conn()
+            # oss2 >= 2.17.0: object_stream.close()
+            # 简单起见，如果 read() 成功，连接通常已关闭。如果读取失败或部分读取，则需要手动关闭。
+            # Pillow 的 Image.open(io.BytesIO(img_data)) 处理的是内存数据，不涉及原始连接。
+            # 如果直接用 Image.open(object_stream.resp)，则Pillow会负责读取和关闭。
+            # 鉴于我们先 read() 了全部数据，这里通常不需要额外关闭。
+            pass
+
+# 从oss获取mask
+def get_mask_object(object_key, access_key_id, access_key_secret, security_token, bucket_name, endpoint, channel):
+    try:
+        auth = oss2.StsAuth(access_key_id,access_key_secret,security_token,auth_version = "v2")
+        bucket = oss2.Bucket(auth, endpoint, bucket_name)
+        object_stream = bucket.get_object(object_key)
+        img_data = object_stream.read()
+        if not img_data:
+            raise ValueError(f"Failed to read data for object: {object_key}")
+        image = Image.open(io.BytesIO(img_data))
+        image = ImageOps.exif_transpose(image)
+
+        if image.getbands() != ("R", "G", "B", "A"):
+            if image.mode == "I":
+                image = image.point(lambda image: image * (1 / 255))
+            image = image.convert("RGBA")
+
+        mask = None
+        c = channel[0].upper()
+        if c in image.getbands():
+            mask = np.array(image.getchannel(c)).astype(np.float32) / 255.0
+            mask = torch.from_numpy(mask)
+            if c == "A":
+                mask = 1. - mask
+        else:
+            mask = torch.zeros((64, 64), dtype=torch.float32, device="cpu")
+        
+        print(f"Successfully loaded image from OSS. Tensor shape: {mask.shape}")
+        return (mask.unsqueeze(0), )
+    except oss2.exceptions.NoSuchKey:
+        print(f"Error: Object '{object_key}' not found in bucket '{bucket_name}'.")
+        # 可以选择返回一个空图像或默认图像，或者直接抛出异常
+        # 这里我们重新抛出异常，让 ComfyUI 显示错误
+        raise oss2.exceptions.NoSuchKey(f"Object '{object_key}' not found in bucket '{bucket_name}'.")
+    except Exception as e:
+        print(f"An error occurred while loading image from OSS: {e}")
+        # 重新抛出异常，以便在 ComfyUI 中看到错误信息
+        raise e
+    finally:
+        # 确保 response 被关闭 (oss2 的 get_object 返回的 stream 在 read() 后通常会自动处理，但显式关闭更安全)
+        if 'object_stream' in locals() and hasattr(object_stream, 'resp') and object_stream.resp:
+            # oss2 < 2.17.0: object_stream.resp.release_conn()
+            # oss2 >= 2.17.0: object_stream.close()
+            # 简单起见，如果 read() 成功，连接通常已关闭。如果读取失败或部分读取，则需要手动关闭。
+            # Pillow 的 Image.open(io.BytesIO(img_data)) 处理的是内存数据，不涉及原始连接。
+            # 如果直接用 Image.open(object_stream.resp)，则Pillow会负责读取和关闭。
+            # 鉴于我们先 read() 了全部数据，这里通常不需要额外关闭。
+            pass
+
+
 # 获取阿里云ak信息
 def get_aliyun_ak(sts_service_url):
     try:
@@ -180,6 +311,22 @@ def get_aliyun_ak(sts_service_url):
         raise ValueError(f"请求错误发生: {req_err}")
     except ValueError as value_err:
         raise ValueError(f"JSON 解析错误: {value_err}")
+
+def upload_image_to_oss(image, filename, sts_service_url, bucket_name, endpoint):
+    """
+    上传图片到阿里云OSS
+    :param image: PIL Image对象
+    :param filename: 上传到OSS的文件名
+    :param sts_service_url: 获取临时STS凭证的服务URL
+    :param bucket_name: OSS存储桶名称
+    :param endpoint: OSS服务的Endpoint
+    """
+    data = get_aliyun_ak(sts_service_url)
+    access_key_id = data["data"]["accessKeyId"]
+    access_key_secret = data["data"]["accessKeySecret"]
+    security_token = data["data"]["securityToken"]
+
+    put_object(image, filename, access_key_id, access_key_secret, security_token, bucket_name, endpoint)
 
 def add_watermark(img, text="AI生成", font_path=None):
     img = img.convert("RGBA")
@@ -305,3 +452,23 @@ def add_watermark(img, text="AI生成", font_path=None):
     draw.text((x, y), text, font=font, fill=watermark_color)
 
     return img
+
+
+
+if __name__ == "__main__":
+    image_list = [
+        "image1.png",
+        "image2.png",
+        "image3.png"
+    ]
+
+    for image_file in image_list:
+        try:
+            # 读取图片
+            image = Image.open(image_file)
+            # 上传到OSS
+            upload_image_file = f"devops/comfyui/input/{image_file}"
+            upload_image_to_oss(image, upload_image_file, "https://devops-id.zhiyitech.cn/api/auth/sts/zhiyi-fd-comfyui?key=ygRYPXhJCc5ZV8Q2s4FLSk", "zhiyi-image", "oss-cn-hangzhou.aliyuncs.com")
+            print(f"成功上传 {image_file} 到 OSS")
+        except Exception as e:
+            print(f"上传 {image_file} 失败: {e}")

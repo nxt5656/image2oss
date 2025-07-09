@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "image2oss"
-version = "0.0.3"
+version = "0.0.4"
 description = "使用阿里云oss上的图片,或者保存结果图片至阿里云oss"
 authors = [
   {name = "nxt5656", email = "nxt5656@live.cn"}
