@@ -8,7 +8,7 @@ __all__ = [
 
 __author__ = """nxt5656"""
 __email__ = "nxt5656@live.cn"
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 from .src.image2oss.nodes import NODE_CLASS_MAPPINGS
 from .src.image2oss.nodes import NODE_DISPLAY_NAME_MAPPINGS

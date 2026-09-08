@@ -6,6 +6,8 @@ import torch
 from PIL import Image, ImageOps, ImageSequence
 from io import BytesIO
 
+from .url_utils import normalize_oss_url
+
 OSS_ENDPOINT_LIST = [
     # 中国内地
     "oss-cn-hangzhou.aliyuncs.com",
@@ -71,6 +73,7 @@ def pil_to_tensor(image):
 
 # 从url中获取图片
 def read_image_from_url(image_url):
+    image_url = normalize_oss_url(image_url)
     try:
         # 1. 获取图片数据 (推荐开启 verify=True)
         response = requests.get(image_url, stream=True, timeout=15) # 增加超时时间

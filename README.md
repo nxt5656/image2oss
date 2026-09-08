@@ -10,6 +10,18 @@
 6. oss2image-sts-service 从阿里云oss上获取图片,使用自建服务阿里云AK&SK&Token
 7. url2image 从url获取图片
 
+### internal
+
+若运行环境位于阿里云 VPC 内，可设置环境变量 `OSS_INTERNAL=1`，`LoadImageFromURL` 会把杭州 OSS 公网地址自动替换为内网地址：
+
+```text
+zhiyi-image.oss-cn-hangzhou.aliyuncs.com
+->
+zhiyi-image.oss-cn-hangzhou-internal.aliyuncs.com
+```
+
+默认保持 `false`，避免集群外环境无法访问内网 endpoint。
+
 
 
 ## Quickstart
